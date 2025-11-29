@@ -1,6 +1,6 @@
 body {
   font-family: Arial, sans-serif;
-  background: #fafafa;
+  background: #f4f4f4;
   padding: 20px;
 }
 
@@ -9,29 +9,54 @@ body {
   margin: auto;
 }
 
+h1 {
+  text-align: center;
+}
+
 input {
   width: 100%;
   padding: 12px;
-  margin-top: 10px;
   font-size: 16px;
+  margin-top: 15px;
+  border-radius: 5px;
+  border: 1px solid #ccc;
 }
 
 button {
   margin-top: 10px;
-  padding: 10px 20px;
+  padding: 12px 20px;
   font-size: 16px;
+  border-radius: 5px;
+  border: none;
+  background: #2374e1;
+  color: white;
   cursor: pointer;
+  width: 100%;
+}
+
+button:hover {
+  background: #185fc4;
+}
+
+#loading {
+  margin-top: 15px;
+  text-align: center;
+  color: #555;
 }
 
 .recipe-card {
   background: white;
-  margin-top: 20px;
+  border: 1px solid #ddd;
   padding: 15px;
   border-radius: 8px;
-  border: 1px solid #ddd;
+  margin-top: 20px;
 }
 
-.recipe-title {
-  font-size: 20px;
-  margin-bottom: 8px;
+.recipe-card h3 {
+  margin: 0 0 10px 0;
+}
+
+.ingredients {
+  margin-top: 10px;
+  line-height: 1.4;
 }
