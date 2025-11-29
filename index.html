@@ -6,21 +6,18 @@
   <title>Offline Recipe Recommender</title>
   <link rel="stylesheet" href="style.css">
 
-  <!-- Correct way to load Transformers.js -->
-  <script type="module">
-    import { pipeline } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.6.1/dist/transformers.min.js";
-    window.pipeline = pipeline;
-  </script>
+  <!-- Correct UMD version: always creates window.Transformers -->
+  <script src="https://cdn.jsdelivr.net/npm/@xenova/transformers@2.6.1/dist/transformers.umd.min.js"></script>
 </head>
 
 <body>
   <div class="container">
     <h1>🍳 Offline Recipe Recommender</h1>
 
-    <input id="ingredientsInput" placeholder="Enter ingredients: tomato, cheese" />
+    <input id="ingredientsInput" placeholder="Enter ingredients..." />
     <button id="searchBtn">Find Recipes</button>
 
-    <div id="loading">Loading model… Please wait</div>
+    <div id="loading">Loading model… please wait</div>
     <div id="results"></div>
   </div>
 
