@@ -6,9 +6,9 @@
   <title>Offline Recipe Recommender</title>
   <link rel="stylesheet" href="style.css">
 
-  <!-- Load Transformers.js (Xenova MiniLM model loader) -->
+  <!-- Correct way to load Transformers.js -->
   <script type="module">
-    import { pipeline } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.6.0";
+    import { pipeline } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.6.1/dist/transformers.min.js";
     window.pipeline = pipeline;
   </script>
 </head>
@@ -17,8 +17,7 @@
   <div class="container">
     <h1>🍳 Offline Recipe Recommender</h1>
 
-    <input id="ingredientsInput" placeholder="Enter ingredients: tomato, cheese, basil" />
-
+    <input id="ingredientsInput" placeholder="Enter ingredients: tomato, cheese" />
     <button id="searchBtn">Find Recipes</button>
 
     <div id="loading">Loading model… Please wait</div>
