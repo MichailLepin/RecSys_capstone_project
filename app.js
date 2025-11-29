@@ -1,104 +1,108 @@
+const MODEL_PATH = "model.onnx";     // MiniLM ONNX
+const VOCAB_PATH = "vocab.json";     // tokenizer vocab
 const TOTAL_CHUNKS = 17;
 
+let tokenizer;
+let session;
 let recipes = [];
-let loaded = false;
 
-const loadDiv = document.getElementById("loading");
+const loadingDiv = document.getElementById("loading");
 const progressDiv = document.getElementById("progress");
 
-// Load JSON chunks
+// ------------------------------
+// Load model + tokenizer
+// ------------------------------
+async function initModel() {
+    loadingDiv.textContent = "Loading MiniLM model…";
+
+    const vocab = await fetch(VOCAB_PATH).then(r => r.json());
+    tokenizer = new BertTokenizer(vocab);
+
+    session = await ort.InferenceSession.create(MODEL_PATH);
+
+    loadingDiv.textContent = "Model ready ✔";
+}
+initModel();
+
+// ------------------------------
+// Cosine similarity
+// ------------------------------
+function cosine(a, b) {
+    let dot = 0, na = 0, nb = 0;
+
+    for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+
+    return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+// ------------------------------
+// Load recipe chunks once
+// ------------------------------
 async function loadChunks() {
-    if (loaded) return recipes;
+    if (recipes.length > 0) return recipes;
 
     let all = [];
     for (let i = 1; i <= TOTAL_CHUNKS; i++) {
         progressDiv.textContent = `Loading chunk ${i}/${TOTAL_CHUNKS}…`;
+
         const chunk = await fetch(`chunks/part${i}.json`).then(r => r.json());
         all.push(...chunk);
     }
-
     progressDiv.textContent = "";
-    loaded = true;
     recipes = all;
-
-    console.log("Loaded recipes:", recipes.length);
     return recipes;
 }
 
-// TEXT → VECTOR (simple bag-of-words)
-function textToVector(text) {
-    const words = text.toLowerCase().split(/[\s,]+/);
-    const vec = {};
+// ------------------------------
+// Compute MiniLM embedding
+// ------------------------------
+async function embed(text) {
+    const { ids, mask } = tokenizer.encode(text);
 
-    for (const w of words) {
-        if (!w) continue;
-        vec[w] = (vec[w] || 0) + 1;
+    const inputs = {
+        input_ids: new ort.Tensor("int64", ids, [1, 128]),
+        attention_mask: new ort.Tensor("int64", new BigInt64Array(mask.map(x=>BigInt(x))), [1, 128])
+    };
+
+    const output = await session.run(inputs);
+    const last = output["last_hidden_state"].data;
+
+    // Mean pooling
+    const dim = 384;
+    let vec = new Array(dim).fill(0);
+    for (let i = 0; i < 128; i++) {
+        for (let d = 0; d < dim; d++) {
+            vec[d] += Number(last[i * dim + d]);
+        }
     }
-
-    return vec;
+    return vec.map(v => v / 128);
 }
 
-// Cosine similarity between bag-of-words and recipe embedding
-function cosineBoW(userVec, recipeEmbedding) {
-    // Convert user BoW to recipe embedding dimension
-    const dim = recipeEmbedding.length;
-    const arr = new Array(dim).fill(0);
-
-    let idx = 0;
-    for (const key in userVec) {
-        // deterministic pseudo-hash to place word into vector
-        const hashedIndex = Math.abs(hashString(key)) % dim;
-        arr[hashedIndex] = userVec[key];
-        idx++;
-    }
-
-    // Now cosine similarity
-    let dot = 0, na = 0, nb = 0;
-
-    for (let i = 0; i < dim; i++) {
-        const a = arr[i];
-        const b = recipeEmbedding[i];
-
-        dot += a * b;
-        na += a * a;
-        nb += b * b;
-    }
-
-    if (na === 0 || nb === 0) return 0;
-    return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
-function hashString(str) {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-        hash = (hash * 31 + str.charCodeAt(i)) | 0;
-    }
-    return hash;
-}
-
+// ------------------------------
+// Main recommend function
+// ------------------------------
 async function recommend() {
     const text = document.getElementById("ingredientsInput").value.trim();
     if (!text) return;
 
-    loadDiv.textContent = "Loading recipes...";
-    const list = await loadChunks();
+    loadingDiv.textContent = "Embedding input…";
+    const userVec = await embed(text);
 
-    loadDiv.textContent = "Computing similarity…";
+    loadingDiv.textContent = "Loading recipes…";
+    const data = await loadChunks();
 
-    // 1. encode user text
-    const userVec = textToVector(text);
-
-    // 2. compute score against MiniLM recipe embeddings
-    list.forEach(r => {
-        r.score = cosineBoW(userVec, r.embedding);
+    loadingDiv.textContent = "Computing similarity…";
+    data.forEach(r => {
+        r.score = cosine(userVec, r.embedding);
     });
 
-    // 3. sort
-    const top = list.sort((a,b) => b.score - a.score).slice(0,3);
+    const top = data.sort((a, b) => b.score - a.score).slice(0, 3);
 
-    // render
-    document.getElementById("results").innerHTML =
-        top.map(r => `
+    document.getElementById("results").innerHTML = top.map(r => `
         <div class="recipe-card">
             <h3>${r.cuisine.toUpperCase()}</h3>
             <b>Score:</b> ${r.score.toFixed(4)}<br>
@@ -106,7 +110,7 @@ async function recommend() {
         </div>
     `).join("");
 
-    loadDiv.textContent = "";
+    loadingDiv.textContent = "";
 }
 
 document.getElementById("searchBtn").onclick = recommend;
