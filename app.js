@@ -1,24 +1,30 @@
+// =======================
+// IMPORT TRANSFORMERS.JS
+// =======================
+import { pipeline } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.6.1";
+
+const loadingDiv = document.getElementById("loading");
+const progressDiv = document.getElementById("progress");
+
 let embedder;
 let modelReady = false;
 
-const loadingDiv = document.getElementById("loading");
+// Load MiniLM model
+async function initModel() {
+  loadingDiv.textContent = "Loading MiniLM model… (~10–20 sec)";
 
-async function loadModel() {
-  loadingDiv.innerText = "Loading model… (10–20 seconds)";
-
-  // UMD API:
-  embedder = await window.Transformers.pipeline(
+  embedder = await pipeline(
     "feature-extraction",
     "Xenova/all-MiniLM-L6-v2"
   );
 
   modelReady = true;
-  loadingDiv.innerText = "Model loaded ✔";
+  loadingDiv.textContent = "Model loaded ✔";
 }
 
-loadModel();
+initModel();
 
-// cosine
+// cosine similarity
 function cosine(a, b) {
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) {
@@ -29,28 +35,49 @@ function cosine(a, b) {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
+// =============================
+// LOAD JSON CHUNKS SEQUENTIALLY
+// =============================
+const TOTAL_CHUNKS = 16;   // <--- Поставь своё количество
+
+async function loadChunks() {
+  let allRecipes = [];
+
+  for (let i = 1; i <= TOTAL_CHUNKS; i++) {
+    progressDiv.textContent = `Loading chunk ${i}/${TOTAL_CHUNKS}…`;
+
+    const url = `chunks/part${i}.json`;
+    const chunk = await fetch(url).then(r => r.json());
+
+    allRecipes = allRecipes.concat(chunk);
+  }
+
+  progressDiv.textContent = "";
+  return allRecipes;
+}
+
+// =============================
+// MAIN RECOMMEND FUNCTION
+// =============================
 async function recommend() {
   if (!modelReady) {
-    alert("Model still loading...");
+    alert("Model is still loading… wait 10–20 sec");
     return;
   }
 
   const text = document.getElementById("ingredientsInput").value.trim();
   if (!text) return;
 
-  loadingDiv.innerText = "Embedding user input…";
+  loadingDiv.textContent = "Embedding your ingredients…";
 
   const output = await embedder(text);
   const userEmbedding = Array.from(output.data[0]);
 
-  loadingDiv.innerText = "Downloading recipes…";
+  loadingDiv.textContent = "Downloading recipe chunks…";
 
-  const recipesURL =
-    "https://github.com/miketernov/RecSys_capstone_project/releases/download/v1/recipes_with_embeddings.json";
+  const recipes = await loadChunks();
 
-  const recipes = await fetch(recipesURL).then(r => r.json());
-
-  loadingDiv.innerText = "Computing similarity…";
+  loadingDiv.textContent = "Computing similarity…";
 
   recipes.forEach(r => {
     r.score = cosine(userEmbedding, r.embedding);
@@ -66,7 +93,7 @@ async function recommend() {
     </div>
   `).join("");
 
-  loadingDiv.innerText = "";
+  loadingDiv.textContent = "";
 }
 
 document.getElementById("searchBtn").onclick = recommend;
