@@ -15,7 +15,7 @@ async function initModel() {
 
   embedder = await pipeline(
     "feature-extraction",
-    "Xenova/all-MiniLM-L6-v2"
+    "Xenova/paraphrase-MiniLM-L3-v2"
   );
 
   modelReady = true;
