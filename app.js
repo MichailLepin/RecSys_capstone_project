@@ -20,6 +20,7 @@ async function loadModel() {
 
 loadModel();
 
+
 // --------------------------
 // Cosine similarity
 // --------------------------
@@ -27,18 +28,19 @@ function cosine(a, b) {
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
-    na += a[i] ** 2;
-    nb += b[i] ** 2;
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
   }
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
+
 
 // --------------------------
 // Recommend recipes
 // --------------------------
 async function recommend() {
   if (!modelReady) {
-    alert("Model is still loading. Please wait a bit...");
+    alert("Model is still loading. Please wait...");
     return;
   }
 
@@ -52,8 +54,8 @@ async function recommend() {
   const userEmbedding = Array.from(output.data[0]);
 
   // 2. Load recipes (from GitHub Release)
-  loadingDiv.innerText = "Fetching recipes… This may take a bit (320MB file)";
-  
+  loadingDiv.innerText = "Fetching recipes… This may take a bit";
+
   const recipesURL =
     "https://github.com/miketernov/RecSys_capstone_project/releases/download/v1/recipes_with_embeddings.json";
 
@@ -70,12 +72,13 @@ async function recommend() {
   const top = recipes.sort((a, b) => b.score - a.score).slice(0, 3);
 
   // 5. Render
-  document.getElementById("results").innerHTML = top
+  const resultsDiv = document.getElementById("results");
+  resultsDiv.innerHTML = top
     .map(
       r => `
     <div class="recipe-card">
       <h3>${r.cuisine.toUpperCase()}</h3>
-      <b>Score:</b> ${r.score.toFixed(4)}<br>
+      <b>Score:</b> ${r.score.toFixed(4)}<br/>
       <div class="ingredients"><b>Ingredients:</b> ${r.ingredients.join(", ")}</div>
     </div>
   `
