@@ -13,7 +13,7 @@ const progress = document.getElementById("progress");
 // =====================================
 // IMPORT ONNX RUNTIME
 // =====================================
-import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js";
+import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.js";
 
 // =====================================
 // LOAD TOKENIZER FILES
