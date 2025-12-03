@@ -8,23 +8,19 @@
 </head>
 <body>
 
-<div class="container">
-    <h1>🔍 Offline Recipe Recommender</h1>
+<h1>🔍 Offline Recipe Recommender</h1>
 
-    <input id="ingredientsInput"
-           placeholder="tomato, cheese, basil or write: I have tomato and cheese, no meat">
-    <button id="searchBtn">Find Recipes</button>
+<input id="ingredientsInput" placeholder="tomato, pasta, cheese">
+<button id="searchBtn">Find Recipes</button>
 
-    <p id="loading"></p>
-    <p id="progress"></p>
+<p id="loading"></p>
+<p id="progress"></p>
+<div id="results"></div>
 
-    <div id="results"></div>
-</div>
+<!-- ONNX Runtime Web -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 
-<!-- LLM в браузере: all-MiniLM-L6-v2 через transformers.js -->
-<script src="https://cdn.jsdelivr.net/npm/@xenova/transformers@3.2.2/dist/transformers.min.js"></script>
-
-<!-- Твой код приложения -->
+<!-- App Logic -->
 <script src="app.js"></script>
 
 </body>
