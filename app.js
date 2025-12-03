@@ -1,13 +1,12 @@
 // ======================================
-// CONFIG — ПУТИ К МОДЕЛИ И ТОКЕНИЗАТОРУ
+// CONFIG — МОДЕЛЬ И ТОКЕНИЗАТОР
 // ======================================
 
-// Модель (model.onnx) лежит в GitHub Release
-// !!! ЗАМЕНИ на свой URL !!!
+// RAW ФАЙЛ model.onnx из твоего Releases (CORS-friendly):
 const MODEL_URL =
   "https://github.com/miketernov/RecSys_capstone_project/releases/download/v1/model.onnx";
 
-// Эти файлы лежат внутри репозитория в папке /model/
+// Локальный токенизатор из /model/
 const TOKENIZER_URL = "model/tokenizer.json";
 
 const TOTAL_CHUNKS = 17;
@@ -28,12 +27,12 @@ async function loadChunks() {
     let all = [];
     for (let i = 1; i <= TOTAL_CHUNKS; i++) {
         progress.textContent = `Loading recipes ${i}/${TOTAL_CHUNKS}…`;
-        const data = await fetch(`chunks/part${i}.json`).then(r => r.json());
-        all.push(...data);
+        const part = await fetch(`chunks/part${i}.json`).then(r => r.json());
+        all.push(...part);
     }
     recipes = all;
     progress.textContent = "";
-    console.log("Loaded recipes:", recipes.length);
+    console.log("Recipes loaded:", recipes.length);
 }
 
 
@@ -42,44 +41,64 @@ async function loadChunks() {
 // ======================================
 async function loadTokenizer() {
     tokenizer = await fetch(TOKENIZER_URL).then(r => r.json());
+
     console.log("Tokenizer loaded");
+    console.log("CLS token index:", tokenizer.vocab["[CLS]"]);
 }
 
 
 // ======================================
-// LOAD ONNX MODEL
+// LOAD MODEL
 // ======================================
 async function loadModel() {
     session = await ort.InferenceSession.create(MODEL_URL);
-    console.log("ONNX model loaded");
+    console.log("MiniLM model loaded");
 }
 
 
 // ======================================
-// TOKENIZE TEXT → IDS
+// TOKENIZATION
 // ======================================
 function tokenize(text) {
     const vocab = tokenizer.vocab;
-    const cls = vocab["[CLS]"];
-    const sep = vocab["[SEP]"];
-    const unk = vocab["[UNK]"];
 
-    let tokens = text.toLowerCase().split(/[^a-z]+/).filter(x => x);
-    let ids = tokens.map(t => vocab[t] ?? unk);
+    const CLS = vocab["[CLS]"];
+    const SEP = vocab["[SEP]"];
+    const UNK = vocab["[UNK]"];
 
-    return [cls, ...ids, sep];
+    if (!CLS || !SEP || !UNK) {
+        console.error("Tokenizer error: CLS/SEP/UNK missing");
+    }
+
+    const tokens = text
+        .toLowerCase()
+        .split(/[^a-z]+/)
+        .filter(t => t.length > 0);
+
+    const ids = tokens.map(t => vocab[t] ?? UNK);
+
+    return [CLS, ...ids, SEP];
 }
 
 
 // ======================================
-// RUN MODEL → GET EMBEDDING
+// EMBEDDING USING ONNX MODEL
 // ======================================
 async function embedText(text) {
     const ids = tokenize(text);
     const mask = ids.map(_ => 1);
 
-    const input_ids = new ort.Tensor("int64", BigInt64Array.from(ids.map(BigInt)), [1, ids.length]);
-    const attention_mask = new ort.Tensor("int64", BigInt64Array.from(mask.map(BigInt)), [1, mask.length]);
+    const input_ids = new ort.Tensor(
+        "int64",
+        BigInt64Array.from(ids.map(BigInt)),
+        [1, ids.length]
+    );
+
+    const attention_mask = new ort.Tensor(
+        "int64",
+        BigInt64Array.from(mask.map(BigInt)),
+        [1, mask.length]
+    );
 
     const output = await session.run({
         input_ids,
@@ -87,16 +106,18 @@ async function embedText(text) {
     });
 
     const hidden = output.last_hidden_state.data;
-    const dim = hidden.length / ids.length;
 
-    // mean pooling
-    let res = new Array(dim).fill(0);
+    const dim = hidden.length / ids.length;
+    let embedding = new Array(dim).fill(0);
+
+    // mean-pooling
     for (let t = 0; t < ids.length; t++) {
         for (let d = 0; d < dim; d++) {
-            res[d] += hidden[t * dim + d];
+            embedding[d] += hidden[t * dim + d];
         }
     }
-    return res.map(v => v / ids.length);
+
+    return embedding.map(v => v / ids.length);
 }
 
 
@@ -118,18 +139,21 @@ function cosine(a, b) {
 // EXPLANATION
 // ======================================
 function explain(query, recipe) {
-    const q = query.toLowerCase().split(/[^a-z]+/);
-    const text = recipe.ingredients.join(" ").toLowerCase();
+    const userWords = query.toLowerCase().split(/[^a-z]+/);
+    const recipeText = recipe.ingredients.join(" ").toLowerCase();
 
-    const overlap = q.filter(w => text.includes(w));
-    return overlap.length
-        ? `Uses your ingredients: ${overlap.join(", ")}`
-        : `Semantically similar to your ingredients.`;
+    const overlap = userWords.filter(w => w && recipeText.includes(w));
+
+    if (overlap.length > 0) {
+        return `Contains your ingredients: ${overlap.join(", ")}`;
+    }
+
+    return "Semantically similar combination of ingredients.";
 }
 
 
 // ======================================
-// RECOMMEND
+// MAIN SEARCH
 // ======================================
 async function recommend() {
     const query = document.getElementById("ingredientsInput").value.trim();
@@ -137,11 +161,11 @@ async function recommend() {
 
     loading.textContent = "Encoding ingredients with MiniLM…";
 
-    const qvec = await embedText("ingredients: " + query);
+    const queryVec = await embedText("ingredients: " + query);
 
-    const scored = recipes.map(r => ({
+    const scored = recipes.map((r, i) => ({
         recipe: r,
-        score: cosine(qvec, r.embedding)
+        score: cosine(queryVec, r.embedding)
     }));
 
     scored.sort((a, b) => b.score - a.score);
@@ -155,7 +179,8 @@ async function recommend() {
             <b>Score:</b> ${x.score.toFixed(4)}<br>
             <b>Ingredients:</b> ${x.recipe.ingredients.join(", ")}<br>
             <i>${explain(query, x.recipe)}</i>
-        </div>`)
+        </div>
+        `)
         .join("");
 
     loading.textContent = "";
@@ -163,7 +188,7 @@ async function recommend() {
 
 
 // ======================================
-// INIT
+// INIT PIPELINE
 // ======================================
 async function init() {
     loading.textContent = "Loading recipes…";
@@ -172,11 +197,12 @@ async function init() {
     loading.textContent = "Loading tokenizer…";
     await loadTokenizer();
 
-    loading.textContent = "Loading model (MiniLM)…";
+    loading.textContent = "Loading MiniLM model…";
     await loadModel();
 
     loading.textContent = "Ready ✔";
 }
 
 init();
+
 document.getElementById("searchBtn").onclick = recommend;
