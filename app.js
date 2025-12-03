@@ -1,74 +1,60 @@
-// =====================================
-// CONFIG
-// =====================================
-const TOTAL_CHUNKS = 17;              // сколько кусков recipes_with_embeddings
-let recipes = [];                     // сюда складываем рецепты
-let recipeEmbeddings = [];            // сюда – эмбеддинги (Float32Array)
-let embedder = null;                  // модель для эмбеддингов запроса
+// ==========================
+// Глобальные переменные
+// ==========================
+const TOTAL_CHUNKS = 17;      // сколько частей ты сделал в Python
+let recipes = [];             // сюда загрузим все рецепты (id, cuisine, ingredients, embedding)
+let embedder = null;          // LLM-модель в браузере
+let modelReady = false;
 
 const loading = document.getElementById("loading");
 const progress = document.getElementById("progress");
 const resultsDiv = document.getElementById("results");
-const searchBtn = document.getElementById("searchBtn");
 
-
-// =====================================
-// 1) Загрузка рецептов с эмбеддингами
-// (chunks/part1.json, part2.json, ...)
-// Каждый рецепт: { id, cuisine, ingredients, embedding: [..] }
-// =====================================
+// ==========================
+// 1) Загрузка чанков с GitHub
+// ==========================
 async function loadChunks() {
     if (recipes.length > 0) return;
 
     let all = [];
     for (let i = 1; i <= TOTAL_CHUNKS; i++) {
-        progress.textContent = `Loading recipes ${i}/${TOTAL_CHUNKS}…`;
-        const chunk = await fetch(`chunks/part${i}.json`).then(r => r.json());
-
-        chunk.forEach(r => {
-            all.push({
-                id: r.id,
-                cuisine: r.cuisine,
-                ingredients: r.ingredients
-            });
-            recipeEmbeddings.push(new Float32Array(r.embedding));
-        });
+        progress.textContent = `Loading chunk ${i}/${TOTAL_CHUNKS}…`;
+        const url = `chunks/part${i}.json`;
+        const chunk = await fetch(url).then(r => r.json());
+        all.push(...chunk);
     }
 
     recipes = all;
-    progress.textContent = "";
+    progress.textContent = `Loaded recipes: ${recipes.length}`;
     console.log("Loaded recipes:", recipes.length);
 }
 
-
-// =====================================
-// 2) Загрузка модели эмбеддингов в браузере
-// Используем @xenova/transformers
-// Модель: all-MiniLM-L6-v2
-// =====================================
+// ==========================
+// 2) Загрузка модели эмбеддингов
+// ==========================
 async function loadModel() {
-    if (embedder) return;
-
-    loading.textContent = "Loading embedding model… (first time is slow)";
-    const { pipeline } = window.transformers;
-
-    // feature-extraction с mean-пулингом и нормализацией
-    embedder = await pipeline(
-        "feature-extraction",
-        "Xenova/all-MiniLM-L6-v2"
-    );
-
-    loading.textContent = "Model loaded ✔";
-    console.log("Model ready");
+    try {
+        const { pipeline } = window.transformers;
+        // feature-extraction даёт эмбеддинг текста
+        embedder = await pipeline(
+            "feature-extraction",
+            "Xenova/all-MiniLM-L6-v2"
+        );
+        modelReady = true;
+        console.log("Embedding model loaded");
+    } catch (e) {
+        console.error("Error loading model:", e);
+        loading.textContent = "Error loading embedding model (see console)";
+    }
 }
 
-
-// =====================================
+// ==========================
 // 3) Косинусное сходство
-// =====================================
+// ==========================
 function cosine(a, b) {
     let dot = 0, na = 0, nb = 0;
-    for (let i = 0; i < a.length; i++) {
+    const len = a.length;
+    for (let i = 0; i < len; i++) {
         const va = a[i];
         const vb = b[i];
         dot += va * vb;
@@ -79,116 +65,112 @@ function cosine(a, b) {
     return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-
-// =====================================
-// 4) Получить эмбеддинг текста пользователя
-// Важно написать строку так же, как в Python:
-// "Ingredients: tomato, cheese, lettuce"
-// =====================================
-async function embedUserIngredients(text) {
-    loading.textContent = "Embedding user ingredients…";
-
-    const fullText = "Ingredients: " + text.toLowerCase();
-
-    // pooling и нормализация есть прямо в options (transformers.js)
-    const output = await embedder(fullText, {
-        pooling: "mean",
-        normalize: true
-    });
-
-    // output.data — Float32Array
-    return output.data;
-}
-
-
-// =====================================
-// 5) Сгенерировать простое объяснение
-// =====================================
-function makeExplanation(recipe, score, userText) {
-    const userTokens = userText
-        .toLowerCase()
-        .split(/[\s,()\/-]+/)
-        .filter(t => t.length > 1);
-
-    const recipeTokens = new Set(
-        recipe.ingredients
-            .join(" ")
-            .toLowerCase()
-            .split(/[\s,()\/-]+/)
-            .filter(t => t.length > 1)
+// ==========================
+// 4) Объяснение для пользователя
+// ==========================
+function buildExplanation(query, recipe) {
+    const qTokens = new Set(
+        query.toLowerCase().split(/[^a-zа-яё]+/).filter(t => t.length > 1)
     );
 
-    const overlap = [...new Set(userTokens.filter(t => recipeTokens.has(t)))];
+    const overlap = new Set();
+    recipe.ingredients.forEach(ing => {
+        const lowIng = ing.toLowerCase();
+        qTokens.forEach(t => {
+            if (lowIng.includes(t)) {
+                overlap.add(t);
+            }
+        });
+    });
 
-    let s = `Cosine similarity: ${(score * 100).toFixed(1)}%. `;
-    if (overlap.length > 0) {
-        s += `Совпадающие ингредиенты: ${overlap.join(", ")}. `;
+    const shared = Array.from(overlap);
+    let reason = `This is a ${recipe.cuisine.toUpperCase()} recipe. `;
+
+    if (shared.length > 0) {
+        reason += `It uses your ingredients: ${shared.join(", ")}.`;
+    } else {
+        reason += `It is semantically close to your ingredient combination.`;
     }
-    s += `Кухня: ${recipe.cuisine.toUpperCase()}.`;
 
-    return s;
+    return reason;
 }
 
-
-// =====================================
-// 6) Основная функция рекомендации
-// =====================================
+// ==========================
+// 5) Рекомендации
+// ==========================
 async function recommend() {
     const txt = document.getElementById("ingredientsInput").value.trim();
     if (!txt) return;
 
+    if (!modelReady) {
+        alert("Embedding model is still loading, please wait a bit.");
+        return;
+    }
+
+    loading.textContent = "Embedding user ingredients… (first time is slow)";
     resultsDiv.innerHTML = "";
-    loading.textContent = "Preparing recommendation…";
 
-    // На всякий случай – дождаться загрузки модели и данных
-    await loadChunks();
-    await loadModel();
+    try {
+        // эмбеддинг запроса, mean pooling + нормализация внутри модели
+        const output = await embedder(txt, {
+            pooling: "mean",
+            normalize: true
+        });
+        const userVec = Array.from(output.data); // Float32Array → обычный массив
 
-    // Эмбеддинг запроса
-    const userVec = await embedUserIngredients(txt);
+        // считаем сходство с эмбеддингами рецептов
+        const scores = recipes.map(r => ({
+            recipe: r,
+            score: cosine(userVec, r.embedding)
+        }));
 
-    // Считаем косинус с каждым рецептом
-    const scored = recipeEmbeddings.map((emb, idx) => ({
-        recipe: recipes[idx],
-        score: cosine(userVec, emb)
-    }));
+        // top-3
+        scores.sort((a, b) => b.score - a.score);
+        const top = scores.slice(0, 3);
 
-    // Топ-3 по схожести
-    const top = scored.sort((a, b) => b.score - a.score).slice(0, 3);
+        // рисуем карточки
+        resultsDiv.innerHTML = top.map(x => {
+            const r = x.recipe;
+            const explanation = buildExplanation(txt, r);
 
-    // Рендер карточек
-    resultsDiv.innerHTML = top.map(x => `
-        <div class="recipe-card">
-            <h3>${x.recipe.cuisine.toUpperCase()}</h3>
-            <p><b>Score:</b> ${x.score.toFixed(4)}</p>
-            <p><b>Ingredients:</b> ${x.recipe.ingredients.join(", ")}</p>
-            <p><i>${makeExplanation(x.recipe, x.score, txt)}</i></p>
-        </div>
-    `).join("");
+            return `
+            <div class="recipe-card">
+                <h3>${r.cuisine.toUpperCase()}</h3>
+                <p><b>Score:</b> ${x.score.toFixed(4)}</p>
+                <p><b>Ingredients:</b> ${r.ingredients.join(", ")}</p>
+                <p class="explanation">${explanation}</p>
+            </div>
+            `;
+        }).join("");
 
-    loading.textContent = "";
+        loading.textContent = "";
+    } catch (e) {
+        console.error("Error in recommend:", e);
+        loading.textContent = "Error during recommendation (see console)";
+    }
 }
 
-
-// =====================================
-// 7) Инициализация при загрузке
-// (загружаем рецепты, потом модель)
-// =====================================
+// ==========================
+// 6) Инициализация
+// ==========================
 async function init() {
     try {
         loading.textContent = "Loading recipes…";
         await loadChunks();
 
-        // Модель можно грузить лениво (при первом поиске),
-        // но для демки лучше сразу:
+        loading.textContent = "Loading embedding model… (first time is slow)";
         await loadModel();
 
-        loading.textContent = "Ready ✔ Type ingredients and click Find Recipes";
+        if (modelReady) {
+            loading.textContent = "Ready ✔ Type your ingredients and press 'Find Recipes'.";
+        }
     } catch (e) {
-        console.error(e);
+        console.error("Init error:", e);
         loading.textContent = "Error during init (see console)";
     }
 }
 
+document.getElementById("searchBtn").onclick = recommend;
+
+// стартуем
 init();
-searchBtn.onclick = recommend;
