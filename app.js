@@ -69,21 +69,130 @@ async function loadOnnxModel() {
 }
 
 // =====================================
-// LOAD RECIPE CHUNKS
+// LOAD RECIPE CHUNKS (OPTIMIZED - PARALLEL LOADING)
 // =====================================
 async function loadChunks() {
     if (recipes.length > 0) return;
 
-    let all = [];
+    // Проверяем кэш в IndexedDB
+    const cached = await loadFromCache();
+    if (cached && cached.length > 0) {
+        recipes = cached;
+        console.log("Loaded recipes from cache:", recipes.length);
+        return;
+    }
+
+    // Параллельная загрузка всех чанков одновременно
+    progress.textContent = `Loading recipes (parallel)…`;
+    const chunkPromises = [];
+    
     for (let i = 1; i <= TOTAL_CHUNKS; i++) {
-        progress.textContent = `Loading recipes ${i}/${TOTAL_CHUNKS}…`;
-        const chunk = await fetch(`chunks/part${i}.json`).then(r => r.json());
+        chunkPromises.push(
+            fetch(`chunks/part${i}.json`)
+                .then(r => r.json())
+                .then(data => {
+                    progress.textContent = `Loading recipes ${i}/${TOTAL_CHUNKS}…`;
+                    return data;
+                })
+        );
+    }
+
+    // Ждем загрузки всех чанков параллельно
+    const chunks = await Promise.all(chunkPromises);
+    
+    // Объединяем все чанки
+    let all = [];
+    for (const chunk of chunks) {
         all.push(...chunk);
     }
 
     recipes = all;
     progress.textContent = "";
     console.log("Loaded recipes:", recipes.length);
+    
+    // Сохраняем в кэш для следующих раз
+    await saveToCache(recipes);
+}
+
+// =====================================
+// INDEXEDDB CACHE
+// =====================================
+let db = null;
+
+async function initDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open("RecipeDB", 1);
+        
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+            db = request.result;
+            resolve(db);
+        };
+        
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains("recipes")) {
+                db.createObjectStore("recipes", { keyPath: "id" });
+            }
+        };
+    });
+}
+
+async function saveToCache(recipes) {
+    try {
+        if (!db) await initDB();
+        
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(["recipes"], "readwrite");
+            const store = transaction.objectStore("recipes");
+            
+            // Сохраняем как один большой объект
+            const request = store.put({ id: "all", data: recipes, timestamp: Date.now() });
+            
+            request.onsuccess = () => {
+                console.log("Recipes cached in IndexedDB");
+                resolve();
+            };
+            
+            request.onerror = () => {
+                console.warn("Failed to cache recipes:", request.error);
+                resolve(); // Не блокируем, если кэш не работает
+            };
+        });
+    } catch (error) {
+        console.warn("Failed to cache recipes:", error);
+    }
+}
+
+async function loadFromCache() {
+    try {
+        if (!db) await initDB();
+        
+        const transaction = db.transaction(["recipes"], "readonly");
+        const store = transaction.objectStore("recipes");
+        const request = store.get("all");
+        
+        return new Promise((resolve, reject) => {
+            request.onsuccess = () => {
+                const result = request.result;
+                if (result && result.data) {
+                    // Проверяем, что кэш не старше 7 дней
+                    const age = Date.now() - result.timestamp;
+                    if (age < 7 * 24 * 60 * 60 * 1000) {
+                        resolve(result.data);
+                    } else {
+                        resolve(null);
+                    }
+                } else {
+                    resolve(null);
+                }
+            };
+            request.onerror = () => resolve(null);
+        });
+    } catch (error) {
+        console.warn("Failed to load from cache:", error);
+        return null;
+    }
 }
 
 // =====================================
@@ -164,6 +273,8 @@ async function recommend() {
 
     const userEmb = await embed(txt);
 
+    loading.textContent = "Searching recipes…";
+
     const scores = recipes.map(r => ({
         recipe: r,
         score: cosine(userEmb, r.embedding)
@@ -188,14 +299,26 @@ async function recommend() {
 // INIT PIPELINE
 // =====================================
 async function init() {
+    // Инициализируем БД для кэша
+    await initDB();
+    
+    loading.textContent = "Initializing…";
+    
+    // Загружаем токенизатор и модель параллельно
+    await Promise.all([
+        (async () => {
+            loading.textContent = "Loading tokenizer…";
+            await loadTokenizer();
+        })(),
+        (async () => {
+            loading.textContent = "Loading MiniLM model (first time is slow)…";
+            await loadOnnxModel();
+        })()
+    ]);
+    
+    // Загружаем рецепты (может быть быстро из кэша)
     loading.textContent = "Loading recipes…";
     await loadChunks();
-
-    loading.textContent = "Loading tokenizer…";
-    await loadTokenizer();
-
-    loading.textContent = "Loading MiniLM model (first time is slow)…";
-    await loadOnnxModel();
 
     loading.textContent = "Ready ✔";
 }
