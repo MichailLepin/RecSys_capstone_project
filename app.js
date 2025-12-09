@@ -37,14 +37,22 @@ function tokenize(text) {
     const tokens = text.split(" ").filter(t => t.length > 0);
 
     const ids = tokens.map(t => tokenizer.vocab[t] ?? tokenizer.vocab["[UNK]"]);
-    return ids.slice(0, 128);
+    // Добавляем [CLS] в начало (если есть в vocab)
+    const clsId = tokenizer.vocab["[CLS]"] ?? tokenizer.vocab["[PAD]"] ?? 0;
+    const paddedIds = [clsId, ...ids].slice(0, 128);
+    
+    return { ids: paddedIds, actualLength: Math.min(ids.length + 1, 128) };
 }
 
 // Convert ids→tensor for ONNX
-function makeTensor(ids) {
-    const input = new Int32Array(128);
+function makeTensor(ids, maxLen = 128) {
+    const input = new Int32Array(maxLen);
     ids.forEach((v, i) => input[i] = v);
-    return new ort.Tensor("int32", input, [1, 128]);
+    // Заполняем padding нулями (если нужно)
+    for (let i = ids.length; i < maxLen; i++) {
+        input[i] = tokenizer.vocab["[PAD]"] ?? 0;
+    }
+    return new ort.Tensor("int32", input, [1, maxLen]);
 }
 
 // =====================================
@@ -82,12 +90,52 @@ async function loadChunks() {
 // ENCODING USER INGREDIENTS
 // =====================================
 async function embed(text) {
-    const ids = tokenize(text);
-    const input_ids = makeTensor(ids);
+    // ВАЖНО: Используем тот же формат, что и при создании эмбеддингов в Python
+    // В Python: "Ingredients: " + ", ".join(ingredients)
+    const formattedText = "Ingredients: " + text;
+    
+    const tokenized = tokenize(formattedText);
+    const input_ids = makeTensor(tokenized.ids);
+    
+    // Создаем attention_mask (1 для реальных токенов, 0 для padding)
+    const attentionMask = new Int32Array(128);
+    for (let i = 0; i < tokenized.actualLength; i++) {
+        attentionMask[i] = 1;
+    }
+    for (let i = tokenized.actualLength; i < 128; i++) {
+        attentionMask[i] = 0;
+    }
+    const attention_mask = new ort.Tensor("int32", attentionMask, [1, 128]);
 
-    const outputs = await session.run({ input_ids });
-    const emb = outputs.last_hidden_state.data;
-
+    const outputs = await session.run({ 
+        input_ids: input_ids,
+        attention_mask: attention_mask 
+    });
+    
+    // ПРОБЛЕМА БЫЛА ЗДЕСЬ: last_hidden_state имеет размерность [1, seq_len, 384]
+    // Нужно применить mean pooling (усреднение по sequence_length, игнорируя padding)
+    const lastHiddenState = outputs.last_hidden_state;
+    
+    // Получаем данные как массив
+    const data = Array.from(lastHiddenState.data);
+    const dims = lastHiddenState.dims; // [batch_size, seq_len, hidden_size]
+    const seqLen = dims[1];
+    const hiddenSize = dims[2];
+    
+    // Mean pooling с учетом attention_mask: усредняем только по реальным токенам
+    const emb = new Array(hiddenSize).fill(0);
+    const actualLength = tokenized.actualLength;
+    
+    for (let i = 0; i < hiddenSize; i++) {
+        let sum = 0;
+        for (let j = 0; j < actualLength; j++) {
+            // Правильный индекс: [batch][seq][hidden] = seq * hidden_size + hidden
+            const idx = j * hiddenSize + i;
+            sum += data[idx];
+        }
+        emb[i] = sum / actualLength;
+    }
+    
     return emb;
 }
 
