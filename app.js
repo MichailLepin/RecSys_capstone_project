@@ -153,11 +153,19 @@ async function loadOnnxModel() {
         // Возможно, нужно использовать ort.default.InferenceSession
         if (ort.default && ort.default.InferenceSession) {
             ort = ort.default;
-        } else if (ort.InferenceSession === undefined) {
+        } else {
+            // ort.InferenceSession отсутствует или falsy (null, undefined, false, 0, etc.)
             console.error("ort object:", ort);
             loading.textContent = "Error: ONNX Runtime structure incorrect";
-            throw new Error("ONNX Runtime not properly loaded. ort.InferenceSession is undefined. Available keys: " + Object.keys(ort).join(", "));
+            const availableKeys = ort ? Object.keys(ort).join(", ") : "none";
+            throw new Error(`ONNX Runtime not properly loaded. ort.InferenceSession is ${ort.InferenceSession === undefined ? 'undefined' : 'falsy'}. Available keys: ${availableKeys}`);
         }
+    }
+    
+    // Финальная проверка после возможного присваивания ort.default
+    if (!ort.InferenceSession) {
+        loading.textContent = "Error: ONNX Runtime InferenceSession not available";
+        throw new Error("ONNX Runtime InferenceSession is not available after all checks");
     }
 
     loading.textContent = "Loading MiniLM model (this may take a moment)…";
