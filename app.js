@@ -18,6 +18,59 @@ const progress = document.getElementById("progress");
 // ONNX Runtime будет загружен динамически
 let ort = null;
 
+// Загружаем ONNX Runtime (правильный способ для ES модулей)
+async function loadONNXRuntime() {
+    // Пробуем использовать динамический импорт ES модулей
+    try {
+        const ortModule = await import('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.wasm.min.js');
+        // ONNX Runtime экспортирует объект с default или напрямую
+        ort = ortModule.default || ortModule;
+        
+        // Проверяем структуру
+        if (ort && ort.InferenceSession) {
+            console.log("ONNX Runtime loaded via ES module ✔");
+            return ort;
+        }
+        
+        // Если структура неправильная, пробуем альтернативные пути
+        if (ortModule.InferenceSession) {
+            ort = ortModule;
+            console.log("ONNX Runtime loaded via ES module (alternative path) ✔");
+            return ort;
+        }
+    } catch (error) {
+        console.warn("ES module import failed, trying script tag:", error);
+    }
+    
+    // Fallback: загрузка через script tag
+    if (window.ort) {
+        ort = window.ort;
+        return ort;
+    }
+    
+    return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.wasm.min.js';
+        script.async = true;
+        script.type = 'text/javascript';
+        
+        script.onload = () => {
+            setTimeout(() => {
+                if (window.ort) {
+                    ort = window.ort;
+                    console.log("ONNX Runtime loaded via script tag ✔");
+                    resolve(ort);
+                } else {
+                    reject(new Error('ONNX Runtime not found on window object'));
+                }
+            }, 200);
+        };
+        
+        script.onerror = () => reject(new Error('Failed to load ONNX Runtime script'));
+        document.head.appendChild(script);
+    });
+}
+
 // =====================================
 // LOAD TOKENIZER FILES
 // =====================================
@@ -59,53 +112,55 @@ function makeTensor(ids, maxLen = 128) {
         input[i] = tokenizer.vocab["[PAD]"] ?? 0;
     }
     // Используем правильный API для создания тензора
-    return new ort.Tensor("int32", input, [1, maxLen]);
+    // ort.Tensor создается через ort.Tensor constructor
+    return new ort.Tensor('int32', input, [1, maxLen]);
 }
 
 // =====================================
 // LOAD MODEL
 // =====================================
 async function loadOnnxModel() {
+    loading.textContent = "Loading ONNX Runtime…";
     console.log("Loading ONNX Runtime…");
     
-    // Динамически загружаем ONNX Runtime
+    // Загружаем ONNX Runtime
     if (!ort) {
         try {
-            // Используем правильный путь для ONNX Runtime
-            const ortModule = await import("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js");
-            ort = ortModule.default || ortModule;
+            ort = await loadONNXRuntime();
             console.log("ONNX Runtime loaded ✔");
         } catch (error) {
-            console.error("Failed to load ONNX Runtime via import:", error);
-            // Попробуем альтернативный способ загрузки через script tag
-            try {
-                await new Promise((resolve, reject) => {
-                    const script = document.createElement('script');
-                    script.src = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js';
-                    script.type = 'text/javascript';
-                    script.onload = () => {
-                        ort = window.ort;
-                        if (ort) {
-                            console.log("ONNX Runtime loaded via script tag ✔");
-                            resolve();
-                        } else {
-                            reject(new Error("ort not found on window"));
-                        }
-                    };
-                    script.onerror = reject;
-                    document.head.appendChild(script);
-                });
-            } catch (error2) {
-                console.error("Failed to load ONNX Runtime via script:", error2);
-                throw new Error("Failed to load ONNX Runtime. Please check your internet connection.");
-            }
+            console.error("Failed to load ONNX Runtime:", error);
+            loading.textContent = "Error: Failed to load ONNX Runtime";
+            throw new Error("Failed to load ONNX Runtime. Please check your internet connection.");
         }
     }
 
-    if (!ort || !ort.InferenceSession) {
-        throw new Error("ONNX Runtime not properly loaded. ort.InferenceSession is undefined.");
+    // Проверяем структуру ort объекта
+    console.log("ort object structure:", {
+        ort: !!ort,
+        InferenceSession: !!ort?.InferenceSession,
+        Tensor: typeof ort?.Tensor,
+        keys: ort ? Object.keys(ort).slice(0, 10) : []
+    });
+    
+    if (!ort) {
+        loading.textContent = "Error: ONNX Runtime not loaded";
+        throw new Error("ONNX Runtime not loaded");
+    }
+    
+    // Проверяем разные возможные пути к InferenceSession
+    if (!ort.InferenceSession) {
+        // Возможно, нужно использовать ort.default.InferenceSession
+        if (ort.default && ort.default.InferenceSession) {
+            ort = ort.default;
+        } else if (ort.InferenceSession === undefined) {
+            console.error("ort object:", ort);
+            loading.textContent = "Error: ONNX Runtime structure incorrect";
+            throw new Error("ONNX Runtime not properly loaded. ort.InferenceSession is undefined. Available keys: " + Object.keys(ort).join(", "));
+        }
     }
 
+    loading.textContent = "Loading MiniLM model (this may take a moment)…";
     console.log("Loading MiniLM ONNX model…");
 
     try {
@@ -115,6 +170,7 @@ async function loadOnnxModel() {
         console.log("MiniLM loaded ✔");
     } catch (error) {
         console.error("Failed to load ONNX model:", error);
+        loading.textContent = "Error: Failed to load model";
         throw new Error("Failed to load ONNX model. Please check the model URL: " + ONNX_URL);
     }
 }
@@ -126,9 +182,11 @@ async function loadChunks() {
     if (recipes.length > 0) return;
 
     // Проверяем кэш в IndexedDB
+    progress.textContent = "Checking cache…";
     const cached = await loadFromCache();
     if (cached && cached.length > 0) {
         recipes = cached;
+        progress.textContent = "";
         console.log("Loaded recipes from cache:", recipes.length);
         return;
     }
@@ -155,16 +213,27 @@ async function loadChunks() {
     }
 
     // Fallback: Параллельная загрузка всех чанков одновременно
-    progress.textContent = `Loading recipes (parallel)…`;
+    progress.textContent = `Loading recipes chunks (0/${TOTAL_CHUNKS})…`;
     const chunkPromises = [];
+    let loadedCount = 0;
+    
+    const updateProgress = () => {
+        loadedCount++;
+        progress.textContent = `Loading recipes chunks (${loadedCount}/${TOTAL_CHUNKS})…`;
+    };
     
     for (let i = 1; i <= TOTAL_CHUNKS; i++) {
         chunkPromises.push(
             fetch(`chunks/part${i}.json`)
                 .then(r => r.json())
                 .then(data => {
-                    progress.textContent = `Loading recipes ${i}/${TOTAL_CHUNKS}…`;
+                    updateProgress();
                     return data;
+                })
+                .catch(error => {
+                    console.error(`Failed to load chunk ${i}:`, error);
+                    updateProgress();
+                    return []; // Возвращаем пустой массив при ошибке
                 })
         );
     }
@@ -175,12 +244,18 @@ async function loadChunks() {
     // Объединяем все чанки
     let all = [];
     for (const chunk of chunks) {
-        all.push(...chunk);
+        if (chunk && chunk.length > 0) {
+            all.push(...chunk);
+        }
     }
 
     recipes = all;
     progress.textContent = "";
     console.log("Loaded recipes:", recipes.length);
+    
+    if (recipes.length === 0) {
+        throw new Error("No recipes loaded. Please check your internet connection.");
+    }
     
     // Сохраняем в кэш для следующих раз
     await saveToCache(recipes);
@@ -343,60 +418,87 @@ function cosine(a, b) {
 // =====================================
 async function recommend() {
     const txt = document.getElementById("ingredientsInput").value.trim();
-    if (!txt) return;
+    if (!txt) {
+        loading.textContent = "Please enter ingredients";
+        return;
+    }
 
-    loading.textContent = "Encoding ingredients with MiniLM…";
+    try {
+        if (!session) {
+            loading.textContent = "Model not loaded yet, please wait...";
+            return;
+        }
 
-    const userEmb = await embed(txt);
+        if (recipes.length === 0) {
+            loading.textContent = "Recipes not loaded yet, please wait...";
+            return;
+        }
 
-    loading.textContent = "Searching recipes…";
+        loading.textContent = "Encoding ingredients…";
+        progress.textContent = "";
 
-    const scores = recipes.map(r => ({
-        recipe: r,
-        score: cosine(userEmb, r.embedding)
-    }));
+        const userEmb = await embed(txt);
 
-    const top = scores.sort((a, b) => b.score - a.score).slice(0, 3);
+        loading.textContent = "Searching recipes…";
+        progress.textContent = `Comparing with ${recipes.length} recipes…`;
 
-    document.getElementById("results").innerHTML =
-        top.map(x => `
-        <div class="recipe-card">
-            <h3>${x.recipe.cuisine.toUpperCase()}</h3>
-            <b>Score:</b> ${x.score.toFixed(4)}<br>
-            <b>Ingredients:</b> ${x.recipe.ingredients.join(", ")}<br><br>
-            <i>This recipe matches your ingredients semantically, using MiniLM embedding similarity.</i>
-        </div>
-    `).join("");
+        const scores = recipes.map(r => ({
+            recipe: r,
+            score: cosine(userEmb, r.embedding)
+        }));
 
-    loading.textContent = "";
+        loading.textContent = "Sorting results…";
+        const top = scores.sort((a, b) => b.score - a.score).slice(0, 3);
+
+        document.getElementById("results").innerHTML =
+            top.map(x => `
+            <div class="recipe-card">
+                <h3>${x.recipe.cuisine.toUpperCase()}</h3>
+                <b>Score:</b> ${x.score.toFixed(4)}<br>
+                <b>Ingredients:</b> ${x.recipe.ingredients.join(", ")}<br><br>
+                <i>This recipe matches your ingredients semantically, using MiniLM embedding similarity.</i>
+            </div>
+        `).join("");
+
+        loading.textContent = "";
+        progress.textContent = "";
+    } catch (error) {
+        console.error("Search error:", error);
+        loading.textContent = `Error: ${error.message}`;
+        progress.textContent = "";
+    }
 }
 
 // =====================================
 // INIT PIPELINE
 // =====================================
 async function init() {
-    // Инициализируем БД для кэша
-    await initDB();
-    
-    loading.textContent = "Initializing…";
-    
-    // Загружаем токенизатор и модель параллельно
-    await Promise.all([
-        (async () => {
-            loading.textContent = "Loading tokenizer…";
-            await loadTokenizer();
-        })(),
-        (async () => {
-            loading.textContent = "Loading MiniLM model (first time is slow)…";
-            await loadOnnxModel();
-        })()
-    ]);
-    
-    // Загружаем рецепты (может быть быстро из кэша)
-    loading.textContent = "Loading recipes…";
-    await loadChunks();
+    try {
+        // Инициализируем БД для кэша
+        loading.textContent = "Initializing…";
+        await initDB();
+        
+        // Загружаем компоненты последовательно для лучшей индикации прогресса
+        loading.textContent = "Loading tokenizer…";
+        await loadTokenizer();
+        console.log("Tokenizer loaded ✔");
+        
+        loading.textContent = "Loading ONNX Runtime…";
+        await loadOnnxModel();
+        console.log("Model loaded ✔");
+        
+        // Загружаем рецепты (может быть быстро из кэша)
+        loading.textContent = "Loading recipes…";
+        await loadChunks();
+        console.log("Recipes loaded ✔");
 
-    loading.textContent = "Ready ✔";
+        loading.textContent = "Ready ✔";
+        progress.textContent = "";
+    } catch (error) {
+        console.error("Initialization error:", error);
+        loading.textContent = `Error: ${error.message}`;
+        progress.textContent = "Please refresh the page";
+    }
 }
 
 init();
