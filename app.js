@@ -375,10 +375,26 @@ async function embed(text) {
     }
     const attention_mask = new ort.Tensor("int32", attentionMask, [1, 128]);
 
-    const outputs = await session.run({ 
+    // Создаем token_type_ids (для одной последовательности все нули)
+    const tokenTypeIds = new Int32Array(128).fill(0);
+    const token_type_ids = new ort.Tensor("int32", tokenTypeIds, [1, 128]);
+
+    // Проверяем, какие входы ожидает модель
+    const inputNames = session.inputNames || [];
+    console.log("Model input names:", inputNames);
+
+    // Формируем входные данные в зависимости от того, что ожидает модель
+    const inputs = {
         input_ids: input_ids,
-        attention_mask: attention_mask 
-    });
+        attention_mask: attention_mask
+    };
+    
+    // Добавляем token_type_ids только если модель его ожидает
+    if (inputNames.includes('token_type_ids')) {
+        inputs.token_type_ids = token_type_ids;
+    }
+
+    const outputs = await session.run(inputs);
     
     // ПРОБЛЕМА БЫЛА ЗДЕСЬ: last_hidden_state имеет размерность [1, seq_len, 384]
     // Нужно применить mean pooling (усреднение по sequence_length, игнорируя padding)
