@@ -2,6 +2,8 @@
 // CONFIG
 // =====================================
 const TOTAL_CHUNKS = 17;
+const USE_SINGLE_FILE = true; // Использовать один файл вместо 17 чанков
+const RECIPES_FILE = "recipes_all.json"; // Объединенный файл
 const ONNX_URL = "https://huggingface.co/iammik3e/recsys-minilm/resolve/main/model.onnx";
 let recipes = [];
 let session = null;
@@ -13,7 +15,8 @@ const progress = document.getElementById("progress");
 // =====================================
 // IMPORT ONNX RUNTIME
 // =====================================
-import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.js";
+// ONNX Runtime будет загружен динамически
+let ort = null;
 
 // =====================================
 // LOAD TOKENIZER FILES
@@ -46,12 +49,16 @@ function tokenize(text) {
 
 // Convert ids→tensor for ONNX
 function makeTensor(ids, maxLen = 128) {
+    if (!ort) {
+        throw new Error("ONNX Runtime not loaded yet");
+    }
     const input = new Int32Array(maxLen);
     ids.forEach((v, i) => input[i] = v);
     // Заполняем padding нулями (если нужно)
     for (let i = ids.length; i < maxLen; i++) {
         input[i] = tokenizer.vocab["[PAD]"] ?? 0;
     }
+    // Используем правильный API для создания тензора
     return new ort.Tensor("int32", input, [1, maxLen]);
 }
 
@@ -59,17 +66,61 @@ function makeTensor(ids, maxLen = 128) {
 // LOAD MODEL
 // =====================================
 async function loadOnnxModel() {
-    console.log("Loading MiniLM ONNX…");
+    console.log("Loading ONNX Runtime…");
+    
+    // Динамически загружаем ONNX Runtime
+    if (!ort) {
+        try {
+            // Используем правильный путь для ONNX Runtime
+            const ortModule = await import("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js");
+            ort = ortModule.default || ortModule;
+            console.log("ONNX Runtime loaded ✔");
+        } catch (error) {
+            console.error("Failed to load ONNX Runtime via import:", error);
+            // Попробуем альтернативный способ загрузки через script tag
+            try {
+                await new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js';
+                    script.type = 'text/javascript';
+                    script.onload = () => {
+                        ort = window.ort;
+                        if (ort) {
+                            console.log("ONNX Runtime loaded via script tag ✔");
+                            resolve();
+                        } else {
+                            reject(new Error("ort not found on window"));
+                        }
+                    };
+                    script.onerror = reject;
+                    document.head.appendChild(script);
+                });
+            } catch (error2) {
+                console.error("Failed to load ONNX Runtime via script:", error2);
+                throw new Error("Failed to load ONNX Runtime. Please check your internet connection.");
+            }
+        }
+    }
 
-    session = await ort.InferenceSession.create(ONNX_URL, {
-        executionProviders: ["wasm"]
-    });
+    if (!ort || !ort.InferenceSession) {
+        throw new Error("ONNX Runtime not properly loaded. ort.InferenceSession is undefined.");
+    }
 
-    console.log("MiniLM loaded ✔");
+    console.log("Loading MiniLM ONNX model…");
+
+    try {
+        session = await ort.InferenceSession.create(ONNX_URL, {
+            executionProviders: ["wasm"]
+        });
+        console.log("MiniLM loaded ✔");
+    } catch (error) {
+        console.error("Failed to load ONNX model:", error);
+        throw new Error("Failed to load ONNX model. Please check the model URL: " + ONNX_URL);
+    }
 }
 
 // =====================================
-// LOAD RECIPE CHUNKS (OPTIMIZED - PARALLEL LOADING)
+// LOAD RECIPE CHUNKS (OPTIMIZED)
 // =====================================
 async function loadChunks() {
     if (recipes.length > 0) return;
@@ -82,7 +133,28 @@ async function loadChunks() {
         return;
     }
 
-    // Параллельная загрузка всех чанков одновременно
+    if (USE_SINGLE_FILE) {
+        // Загрузка из одного объединенного файла (быстрее!)
+        progress.textContent = `Loading recipes from single file…`;
+        try {
+            const response = await fetch(RECIPES_FILE);
+            if (!response.ok) {
+                throw new Error(`Failed to load ${RECIPES_FILE}, falling back to chunks`);
+            }
+            recipes = await response.json();
+            progress.textContent = "";
+            console.log("Loaded recipes from single file:", recipes.length);
+            
+            // Сохраняем в кэш
+            await saveToCache(recipes);
+            return;
+        } catch (error) {
+            console.warn("Single file not found, using chunks:", error);
+            // Fallback к загрузке чанков
+        }
+    }
+
+    // Fallback: Параллельная загрузка всех чанков одновременно
     progress.textContent = `Loading recipes (parallel)…`;
     const chunkPromises = [];
     
@@ -207,6 +279,10 @@ async function embed(text) {
     const input_ids = makeTensor(tokenized.ids);
     
     // Создаем attention_mask (1 для реальных токенов, 0 для padding)
+    if (!ort) {
+        throw new Error("ONNX Runtime not loaded yet");
+    }
+    
     const attentionMask = new Int32Array(128);
     for (let i = 0; i < tokenized.actualLength; i++) {
         attentionMask[i] = 1;
