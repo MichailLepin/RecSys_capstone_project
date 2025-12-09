@@ -101,19 +101,20 @@ function tokenize(text) {
 }
 
 // Convert ids→tensor for ONNX
+// ВАЖНО: Модель ожидает int64, а не int32!
 function makeTensor(ids, maxLen = 128) {
     if (!ort) {
         throw new Error("ONNX Runtime not loaded yet");
     }
-    const input = new Int32Array(maxLen);
-    ids.forEach((v, i) => input[i] = v);
+    // Используем BigInt64Array для int64 (модель ожидает int64)
+    const input = new BigInt64Array(maxLen);
+    ids.forEach((v, i) => input[i] = BigInt(v));
     // Заполняем padding нулями (если нужно)
     for (let i = ids.length; i < maxLen; i++) {
-        input[i] = tokenizer.vocab["[PAD]"] ?? 0;
+        input[i] = BigInt(tokenizer.vocab["[PAD]"] ?? 0);
     }
-    // Используем правильный API для создания тензора
-    // ort.Tensor создается через ort.Tensor constructor
-    return new ort.Tensor('int32', input, [1, maxLen]);
+    // Используем правильный API для создания тензора с типом int64
+    return new ort.Tensor('int64', input, [1, maxLen]);
 }
 
 // =====================================
@@ -366,55 +367,93 @@ async function embed(text) {
         throw new Error("ONNX Runtime not loaded yet");
     }
     
-    const attentionMask = new Int32Array(128);
+    // ВАЖНО: Модель ожидает int64 для всех входов!
+    // Создаем attention_mask (1 для реальных токенов, 0 для padding)
+    const attentionMask = new BigInt64Array(128);
     for (let i = 0; i < tokenized.actualLength; i++) {
-        attentionMask[i] = 1;
+        attentionMask[i] = BigInt(1);
     }
     for (let i = tokenized.actualLength; i < 128; i++) {
-        attentionMask[i] = 0;
+        attentionMask[i] = BigInt(0);
     }
-    const attention_mask = new ort.Tensor("int32", attentionMask, [1, 128]);
+    const attention_mask = new ort.Tensor("int64", attentionMask, [1, 128]);
 
     // Создаем token_type_ids (для одной последовательности все нули)
-    const tokenTypeIds = new Int32Array(128).fill(0);
-    const token_type_ids = new ort.Tensor("int32", tokenTypeIds, [1, 128]);
+    const tokenTypeIds = new BigInt64Array(128);
+    tokenTypeIds.fill(BigInt(0));
+    const token_type_ids = new ort.Tensor("int64", tokenTypeIds, [1, 128]);
 
     // Проверяем, какие входы ожидает модель
     const inputNames = session.inputNames || [];
     console.log("Model input names:", inputNames);
 
-    // Формируем входные данные в зависимости от того, что ожидает модель
+    // Формируем входные данные - модель ожидает все три параметра
     const inputs = {
         input_ids: input_ids,
-        attention_mask: attention_mask
+        attention_mask: attention_mask,
+        token_type_ids: token_type_ids
     };
-    
-    // Добавляем token_type_ids только если модель его ожидает
-    if (inputNames.includes('token_type_ids')) {
-        inputs.token_type_ids = token_type_ids;
-    }
 
-    const outputs = await session.run(inputs);
-    
+    try {
+        const outputs = await session.run(inputs);
+        return processModelOutput(outputs, tokenized.actualLength);
+    } catch (error) {
+        console.error("Model inference error:", error);
+        console.error("Input shapes:", {
+            input_ids: input_ids.dims,
+            attention_mask: attention_mask.dims,
+            token_type_ids: token_type_ids.dims
+        });
+        console.error("Input types:", {
+            input_ids: input_ids.type,
+            attention_mask: attention_mask.type,
+            token_type_ids: token_type_ids.type
+        });
+        throw error;
+    }
+}
+
+// Обработка выхода модели и применение mean pooling
+function processModelOutput(outputs, actualLength) {
     // ПРОБЛЕМА БЫЛА ЗДЕСЬ: last_hidden_state имеет размерность [1, seq_len, 384]
     // Нужно применить mean pooling (усреднение по sequence_length, игнорируя padding)
-    const lastHiddenState = outputs.last_hidden_state;
+    
+    // Проверяем доступные выходы модели
+    const outputNames = Object.keys(outputs);
+    console.log("Model output names:", outputNames);
+    
+    // Ищем last_hidden_state в выходах (может быть под разными именами)
+    let lastHiddenState = outputs.last_hidden_state || 
+                         outputs['last_hidden_state'] ||
+                         outputs[outputNames[0]]; // Используем первый выход, если не найдено
+    
+    if (!lastHiddenState) {
+        throw new Error(`Could not find last_hidden_state in model outputs. Available outputs: ${outputNames.join(", ")}`);
+    }
     
     // Получаем данные как массив
     const data = Array.from(lastHiddenState.data);
     const dims = lastHiddenState.dims; // [batch_size, seq_len, hidden_size]
+    
+    if (!dims || dims.length !== 3) {
+        throw new Error(`Unexpected output shape. Expected [batch, seq_len, hidden_size], got: ${dims}`);
+    }
+    
     const seqLen = dims[1];
     const hiddenSize = dims[2];
     
     // Mean pooling с учетом attention_mask: усредняем только по реальным токенам
     const emb = new Array(hiddenSize).fill(0);
-    const actualLength = tokenized.actualLength;
     
     for (let i = 0; i < hiddenSize; i++) {
         let sum = 0;
         for (let j = 0; j < actualLength; j++) {
             // Правильный индекс: [batch][seq][hidden] = seq * hidden_size + hidden
             const idx = j * hiddenSize + i;
+            if (idx >= data.length) {
+                console.warn(`Index ${idx} out of bounds for data length ${data.length}`);
+                break;
+            }
             sum += data[idx];
         }
         emb[i] = sum / actualLength;
